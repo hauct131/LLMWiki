@@ -1,0 +1,32 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+build/
+dist/
+
+# --- IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Project Specific (Quan trọng!) ---
+# Đừng push đống file Markdown bạn đã tạo ra lên code repo 
+# trừ khi bạn muốn lưu trữ chúng như dữ liệu mẫu.
+vault/_sources/*.md
+vault/_sidecars/*.json
+vault/_concepts/*.md
+vault/log.md
+vault/index.md
+
+# Nếu bạn có file chứa API Key (sau này nếu dùng OpenAI)
+.env
+
+# --- OS -
+.DS_Store
+Thumbs.db
