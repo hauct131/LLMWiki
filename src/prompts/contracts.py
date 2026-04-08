@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from ..utils.clean_terms import clean_terms
 
 # ---------------------------------------------------------------------------
 # Base contract type
@@ -108,7 +109,10 @@ def _p0_5_build(text_snippet: str) -> str:
     return (
         "Analyze the following text and determine its category.\n"
         "Categories:\n"
-        "- SCIENTIFIC_PAPER: Has Abstract, Intro, References, and academic affiliations.\n"
+        "- BENCHMARK_PAPER: Shared tasks, competitions, evaluation campaigns, dataset papers "
+        "(e.g. SemEval, CoNLL, GLUE, ImageNet). Has subtasks, leaderboards, participant teams.\n"
+        "- SCIENTIFIC_PAPER: Has Abstract, Intro, References, and academic affiliations. "
+        "Proposes a method or model.\n"
         "- TECHNICAL_DOCUMENTATION: Manuals, API docs, or READMEs.\n"
         "- NEWS_ARTICLE: Journalistic style, no formal academic structure.\n"
         "- OTHER: General text.\n\n"
@@ -120,7 +124,8 @@ def _p0_5_validate(out: str) -> bool:
     out = out.strip()
     if "|" not in out:
         return False
-    valid_cats = ["SCIENTIFIC_PAPER", "TECHNICAL_DOCUMENTATION", "NEWS_ARTICLE", "OTHER"]
+    valid_cats = ["BENCHMARK_PAPER", "SCIENTIFIC_PAPER", "TECHNICAL_DOCUMENTATION",
+                  "NEWS_ARTICLE", "OTHER"]
     return any(cat in out for cat in valid_cats)
 
 def _p0_5_extract(out: str) -> dict[str, str]:
@@ -391,13 +396,23 @@ P5_QUESTIONS = PromptContract(
 
 def _p6_build(text: str, n_terms: int = 7) -> str:
     return (
-        "Extract 7-10 core TECHNICAL concepts for a research wiki.\n"
-        "STRICT RULES:\n"
-        "- ONLY technical terms (e.g., 'Aspect Extraction', 'N-grams', 'CRF').\n"
-        "- NO author names or citations (e.g., SKIP 'Ganu', 'Pang', 'Liu').\n"
-        "- NO statistics (e.g., SKIP '163 submissions', '32 teams').\n"
-        "- NO institutional names.\n"
-        "Output: One term per line, no bullets.\n\n"
+        "Extract 5-10 technical concepts from this research text for a wiki.\n\n"
+        "RULES — read carefully:\n"
+        "✓ INCLUDE: method names, model architectures, algorithm names, dataset names, "
+        "evaluation metrics, NLP/ML tasks (e.g. 'Aspect Term Extraction', 'CRF', 'F1 Score').\n"
+        "✗ EXCLUDE author names (e.g. 'Pontiki', 'Manning', 'Ganu').\n"
+        "✗ EXCLUDE statistics or counts (e.g. '163 submissions', '32 teams', '3041 sentences').\n"
+        "✗ EXCLUDE sentiment labels (e.g. 'Positive Negative Conflict Neutral').\n"
+        "✗ EXCLUDE table headers or column names (e.g. 'Train Test Acc', 'Category Total').\n"
+        "✗ EXCLUDE institution names or affiliations.\n\n"
+        "OUTPUT FORMAT: one concept per line, no bullets, no numbers.\n"
+        "Each concept: 1 to 3 words maximum.\n\n"
+        "EXAMPLES of correct output:\n"
+        "Conditional Random Fields\n"
+        "Aspect Term Extraction\n"
+        "Sentiment Analysis\n"
+        "SemEval\n"
+        "Named Entity Recognition\n\n"
         f"TEXT:\n{text[:3000]}"
     )
 
@@ -405,22 +420,30 @@ def _p6_validate(out: str) -> bool:
     lines = [l.strip() for l in out.splitlines() if l.strip()]
     if not (3 <= len(lines) <= 20):
         return False
+    valid = 0
     for l in lines:
+        # Reject if starts with bullet or number
         if l.startswith("- ") or re.match(r"^\d+\.", l):
-            return False
-        if len(l.split()) > 6:
-            return False
-    return True
+            continue
+        # Reject if more than 4 words (concatenated junk)
+        if len(l.split()) > 4:
+            continue
+        # Reject if contains digits (stats, counts)
+        if re.search(r"\d", l):
+            continue
+        valid += 1
+    return valid >= 3
 
 def _p6_extract(out: str) -> list[str]:
     raw = [l.strip() for l in out.splitlines() if l.strip()]
-    # Filter stopwords and common junk
-    filtered = []
-    for term in raw:
-        words = term.lower().split()
-        if not any(w in STOPWORDS for w in words):
-            filtered.append(term)
-    return filtered
+    # Strip any bullets/numbers the model added despite instructions
+    cleaned_raw = []
+    for line in raw:
+        line = re.sub(r"^[-*•]\s+", "", line)
+        line = re.sub(r"^\d+[.)]\s*", "", line)
+        cleaned_raw.append(line.strip())
+    # Run through the full clean_terms pipeline
+    return clean_terms(cleaned_raw)
 
 def _p6_fallback(candidate_links: list = None, **_) -> list[str]:
     return candidate_links or []
@@ -522,15 +545,69 @@ P8_CONCEPT = PromptContract(
 
 
 # ============================================================================
+# P3_BENCHMARK — Key Methodology for shared task / benchmark papers
+# Used when doc_type == BENCHMARK_PAPER (SemEval, CoNLL, GLUE, etc.)
+# ============================================================================
+
+def _p3_benchmark_build(text: str, n_methods: int = 4) -> str:
+    return (
+        "This is a benchmark/shared task paper. Extract the key subtasks, datasets, "
+        "and evaluation metrics it defines.\n\n"
+        "STRICT FORMAT — one bullet per item:\n"
+        "- Subtask/Dataset/Metric Name: one sentence describing what it is.\n\n"
+        "EXAMPLES:\n"
+        "- Aspect Term Extraction: Identifying aspect terms (e.g. 'battery') in review sentences.\n"
+        "- Restaurants Dataset: 3041 sentences from restaurant reviews, manually annotated.\n"
+        "- Accuracy Metric: Percentage of correctly predicted aspect polarities.\n\n"
+        "DO NOT include author names, team names, submission counts, or institution names.\n\n"
+        f"TEXT:\n{text[:4000]}"
+    )
+
+def _p3_benchmark_validate(out: str) -> bool:
+    bullets = _bullet_lines(out)
+    if len(bullets) < 2:
+        return False
+    # Each bullet must have ": " separator
+    return sum(1 for b in bullets if ": " in b) >= 2
+
+def _p3_benchmark_extract(out: str) -> list[str]:
+    return _bullet_lines(out)
+
+def _p3_benchmark_fallback(extracted_sections: dict = None, cleaned_text: str = "") -> list[str]:
+    sections = extracted_sections or {}
+    source = sections.get("abstract") or sections.get("introduction") or cleaned_text
+    bullets = [l.strip() for l in source.splitlines()
+               if re.match(r"^[-*•]\s+", l) or re.match(r"^\d+\.\s+", l)]
+    if bullets:
+        return [f"- {b.lstrip('-*•0123456789. ')}" for b in bullets[:5]]
+    sentences = re.split(r"(?<=[.!?])\s+", source.strip())
+    return [f"- {s.strip()}" for s in sentences[:4] if len(s.split()) >= 5]
+
+P3_KEY_METHODS_BENCHMARK = PromptContract(
+    name="P3_key_methods_benchmark",
+    system=(
+        "You are a technical extraction tool for benchmark papers. "
+        "Output only bullet points describing subtasks, datasets, and metrics. "
+        "No author names. No statistics about submission counts."
+    ),
+    build=_p3_benchmark_build,
+    validate=_p3_benchmark_validate,
+    extract=_p3_benchmark_extract,
+    fallback=_p3_benchmark_fallback,
+)
+
+
+# ============================================================================
 # Registry (ordered by execution sequence)
 # ============================================================================
 
 ALL_CONTRACTS: dict[str, PromptContract] = {
     "P0": P0_TITLE,
-    "P0_5": P0_DOC_TYPE, # Integrated Document Classifier
+    "P0_5": P0_DOC_TYPE,
     "P1": P1_AUTHORS,
     "P2": P2_SUMMARY,
     "P3": P3_KEY_METHODS,
+    "P3_BENCHMARK": P3_KEY_METHODS_BENCHMARK,
     "P4": P4_ANALYSIS,
     "P5": P5_QUESTIONS,
     "P6": P6_TERMS,

@@ -26,6 +26,7 @@ from ..prompts.contracts import (
     P1_AUTHORS,
     P2_SUMMARY,
     P3_KEY_METHODS,
+    P3_KEY_METHODS_BENCHMARK,
     P4_ANALYSIS,
     P5_QUESTIONS,
     P6_TERMS,

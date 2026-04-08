@@ -2,10 +2,15 @@
 llm_router.py — Routes LLM calls to the right backend with timeout + error isolation.
 
 Responsibilities:
-  - Try remote API first (if configured), fall back to Ollama.
+  - Try Gemini API first (if configured), then OpenAI-compatible, then Ollama.
   - Enforce per-call timeouts so a hung model never blocks the pipeline.
   - Return a plain string. Never raise — on any failure, return "".
   - Callers (prompt_runner) are responsible for validating the string.
+
+Routing priority:
+  1. Gemini API  (if config.gemini_api_key is set)
+  2. OpenAI-compatible remote  (if config.use_remote_api and config.remote_api_key)
+  3. Ollama  (always available as last resort)
 
 Design contract:
   - `call(prompt, system, config) -> str`
@@ -41,18 +46,93 @@ def call_llm(
     Returns the model's text response, or "" on any failure.
     Never raises.
     """
-    temperature = temperature_override or config.profile.temperature
+    temperature = temperature_override if temperature_override is not None \
+        else config.profile.temperature
     max_tokens  = config.profile.max_output_tokens
 
+    # ── Priority 1: Gemini ────────────────────────────────────────────────
+    if getattr(config, "gemini_api_key", ""):
+        result = _call_gemini(prompt, system, config, temperature, max_tokens)
+        if result:
+            return result
+        logger.warning("Gemini API failed — trying next backend")
+
+    # ── Priority 2: OpenAI-compatible remote ──────────────────────────────
     if config.use_remote_api and config.remote_api_key:
-        result = _call_openai_compatible(
-            prompt, system, config, temperature, max_tokens
-        )
+        result = _call_openai_compatible(prompt, system, config, temperature, max_tokens)
         if result:
             return result
         logger.warning("Remote API failed — falling back to Ollama")
 
+    # ── Priority 3: Ollama (always last resort) ───────────────────────────
     return _call_ollama(prompt, system, config, temperature, max_tokens)
+
+
+# ---------------------------------------------------------------------------
+# Backend: Gemini  (https://generativelanguage.googleapis.com/v1beta)
+# ---------------------------------------------------------------------------
+
+def _call_gemini(
+    prompt: str,
+    system: str,
+    config: PipelineConfig,
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    """
+    Call Gemini via REST API (no SDK required).
+    Uses gemini-2.0-flash by default — fast and cheap.
+    Model is overridable via config.gemini_model_name.
+    """
+    api_key    = getattr(config, "gemini_api_key", "")
+    model_name = getattr(config, "gemini_model_name", "gemini-2.0-flash")
+    timeout    = config.api_timeout_secs
+
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model_name}:generateContent?key={api_key}"
+    )
+
+    # Gemini uses systemInstruction separately from user parts
+    payload: dict = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": prompt}],
+            }
+        ],
+        "generationConfig": {
+            "temperature":    temperature,
+            "maxOutputTokens": max_tokens,
+            "candidateCount": 1,
+        },
+    }
+
+    if system:
+        payload["systemInstruction"] = {
+            "parts": [{"text": system}]
+        }
+
+    headers = {"Content-Type": "application/json"}
+    raw = _http_post(url, headers, payload, timeout)
+    if not raw:
+        return ""
+
+    try:
+        data = json.loads(raw)
+        # Navigate: candidates[0].content.parts[0].text
+        candidates = data.get("candidates", [])
+        if not candidates:
+            logger.warning("Gemini returned no candidates: %r", raw[:200])
+            return ""
+        content = candidates[0].get("content", {})
+        parts   = content.get("parts", [])
+        if not parts:
+            return ""
+        return parts[0].get("text", "")
+    except (json.JSONDecodeError, KeyError, IndexError) as exc:
+        logger.warning("Gemini response parse error: %s | raw: %r", exc, raw[:200])
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +230,9 @@ def _http_post(
                 pass
             return raw
 
+    except urllib.error.HTTPError as exc:
+        logger.error("LLM HTTP %d error (%s): %s", exc.code, url, exc.reason)
+        return ""
     except urllib.error.URLError as exc:
         logger.error("LLM network error (%s): %s", url, exc)
         return ""

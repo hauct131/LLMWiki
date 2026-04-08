@@ -87,6 +87,10 @@ class PipelineConfig:
     use_remote_api:    bool      = False    # True → OpenAI-compatible remote
     remote_api_key:    str       = ""
 
+    # ── Gemini (priority 1 backend if key is set) ─────────────────────────
+    gemini_api_key:    str       = ""   # Set this to enable Gemini
+    gemini_model_name: str       = "gemini-2.0-flash"  # Fast and cheap default
+
     # ── Output paths ─────────────────────────────────────────────────────────
     output_dir:        str       = "./vault/_sources"
     concepts_dir:      str       = "./vault/_concepts"
