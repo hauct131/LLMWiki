@@ -7,8 +7,9 @@ This makes the system trivially testable with extreme configurations.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import List, Literal, Optional
 
 
 ModelTier = Literal["3b", "7b", "13b+"]
@@ -88,7 +89,10 @@ class PipelineConfig:
     remote_api_key:    str       = ""
 
     # ── Gemini (priority 1 backend if key is set) ─────────────────────────
-    gemini_api_key:    str       = ""   # Set this to enable Gemini
+    # Single key for backward compatibility
+    gemini_api_key:    str       = ""
+    # List of keys for rotation (read from env GEMINI_API_KEYS)
+    gemini_api_keys:   List[str] = field(default_factory=list)
     gemini_model_name: str       = "gemini-2.0-flash"  # Fast and cheap default
 
     # ── Output paths ─────────────────────────────────────────────────────────
@@ -117,6 +121,21 @@ class PipelineConfig:
     # ── Retry policy ──────────────────────────────────────────────────────────
     max_retries_per_level:  int  = 1    # retry once before downgrading
     retry_temperature_delta: float = -0.05  # lower temp on retry
+
+    def __post_init__(self):
+        # Load Gemini keys from environment if not explicitly set
+        if not self.gemini_api_keys:
+            keys_str = os.getenv("GEMINI_API_KEYS", "")
+            if keys_str:
+                self.gemini_api_keys = [k.strip() for k in keys_str.split(",") if k.strip()]
+        # If still empty, try single key from env or from the field
+        if not self.gemini_api_keys:
+            single_key = self.gemini_api_key or os.getenv("GEMINI_API_KEY", "")
+            if single_key:
+                self.gemini_api_keys = [single_key]
+        # For backward compatibility, set gemini_api_key to the first key if available
+        if self.gemini_api_keys and not self.gemini_api_key:
+            self.gemini_api_key = self.gemini_api_keys[0]
 
     # ── Derived ───────────────────────────────────────────────────────────────
     @property
