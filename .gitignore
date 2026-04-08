@@ -1,32 +1,70 @@
-# --- Python ---
+# --- Python & Virtual Environment ---
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
 .venv/
 venv/
 ENV/
 env/
-build/
-dist/
+ENV/
 
-# --- IDEs ---
+# --- IDEs and Editors ---
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# --- Project Specific (Quan trọng!) ---
-# Đừng push đống file Markdown bạn đã tạo ra lên code repo 
-# trừ khi bạn muốn lưu trữ chúng như dữ liệu mẫu.
-vault/_sources/*.md
-vault/_sidecars/*.json
-vault/_concepts/*.md
-vault/log.md
-vault/index.md
-
-# Nếu bạn có file chứa API Key (sau này nếu dùng OpenAI)
-.env
-
-# --- OS -
+*~
 .DS_Store
 Thumbs.db
+
+# --- Project Specific ---
+# Không commit output của pipeline (Obsidian vault content)
+vault/_sources/
+vault/_sidecars/
+vault/_concepts/
+vault/index.md
+vault/log.md
+vault/*.md
+
+# PDF files đã download (nếu có)
+_pdfs/
+
+# Environment variables & API keys
+.env
+.env*
+*.env
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Jupyter Notebook checkpoints (nếu sau này dùng)
+.ipynb_checkpoints/
+
+# --- Misc ---
+# Local only
+*.local
