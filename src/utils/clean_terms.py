@@ -19,32 +19,11 @@ from __future__ import annotations
 
 import re
 from typing import Sequence
-
-
-# ---------------------------------------------------------------------------
-# Known-good technical term patterns
-# ---------------------------------------------------------------------------
-
-# Acronyms: 2-6 uppercase letters, optionally with digits (LSTM, BERT, CRF, SB1)
-_ACRONYM = re.compile(r"^[A-Z][A-Z0-9]{1,5}(?:-[A-Z0-9]+)?$")
-
-# Title-case phrase: each word starts uppercase, 1–4 words
-_TITLECASE_PHRASE = re.compile(
-    r"^[A-Z][a-z]{1,}(?:\s+[A-Z][a-z]{1,}){0,3}$"
-)
-
-# Mixed case technical terms (camelCase / PascalCase internal)
-_CAMEL = re.compile(r"^[A-Z][a-z]+[A-Z][a-zA-Z]+$")
-
+from .concept_normalizer import normalize_concept
 
 # ---------------------------------------------------------------------------
-# Rejection patterns — if ANY match, the term is dropped
+# Known-good technical term patterns (kept for reference, used implicitly)
 # ---------------------------------------------------------------------------
-
-# Looks like an author name: "Firstname Lastname" with no other words
-_AUTHOR_NAME = re.compile(
-    r"^[A-Z][a-z]{1,15}\s+[A-Z][a-z]{1,15}$"
-)
 
 # Contains digits (table headers, counts, years, percentages)
 _CONTAINS_DIGIT = re.compile(r"\d")
@@ -52,32 +31,26 @@ _CONTAINS_DIGIT = re.compile(r"\d")
 # Email / URL fragments
 _EMAIL_OR_URL = re.compile(r"[@/\\.]")
 
-# All-caps single word that is probably an abbreviation of a proper noun
-# (we keep known short acronyms via _ACRONYM but reject long ones)
+# All-caps 7+ chars = not a real acronym
 _LONG_ALLCAPS = re.compile(r"^[A-Z]{7,}$")
 
-# Sentence fragments: ends with comma, starts with lowercase
+# Fragment: starts lowercase or ends with comma
 _FRAGMENT = re.compile(r"^[a-z]|,$")
 
-# Noise from table/CSV rows: multiple uppercase tokens concatenated with spaces
-# e.g. "Laptops Restaurants Team Acc", "Total Category Train Test"
-# Heuristic: 4+ words all starting uppercase → table row junk
-_TABLE_ROW_JUNK = re.compile(
-    r"^(?:[A-Z][a-zA-Z]*\s+){3,}[A-Z][a-zA-Z]*$"
-)
+# 4+ capitalized words = table row junk
+_TABLE_ROW_JUNK = re.compile(r"^(?:[A-Z][a-zA-Z]*\s+){3,}[A-Z][a-zA-Z]*$")
 
-# Sentiment label concatenations: "Positive Negative Conflict Neutral"
-# Detected as: 3+ known sentiment / polarity words joined
+# Sentiment label concatenations
 _SENTIMENT_WORDS = {"Positive", "Negative", "Neutral", "Conflict", "Mixed",
                     "None", "Unknown", "Other"}
 
-# Citation junk: "et al", "ibid", standalone "al"
-_CITATION = re.compile(r"\bet\s+al\b|\bibid\b|\b^al$\b", re.I)
+# Citation junk
+_CITATION = re.compile(r"\bet\s+al\b|\bibid\b", re.I)
 
-# Obsidian artifacts if model accidentally included brackets
+# Obsidian link brackets
 _BRACKETS = re.compile(r"\[|\]")
 
-# Common English connectors that shouldn't be terms
+# Common English connectors that should never be wiki concepts
 _CONNECTOR_TERMS = {
     "the", "and", "or", "of", "in", "on", "to", "for", "with",
     "by", "at", "from", "as", "is", "are", "a", "an",
@@ -89,12 +62,34 @@ _CONNECTOR_TERMS = {
 
 
 # ---------------------------------------------------------------------------
-# Allowlist: terms that look like junk by heuristic but are genuinely technical
+# Common English/Asian first names — used to detect "Firstname Lastname" patterns
+# WITHOUT catching real technical 2-word terms like "Sentiment Analysis"
 # ---------------------------------------------------------------------------
+_FIRST_NAMES = {
+    "john", "james", "robert", "michael", "william", "david", "richard",
+    "joseph", "thomas", "charles", "christopher", "daniel", "matthew",
+    "mark", "donald", "paul", "steven", "andrew", "kenneth", "george",
+    "mary", "patricia", "jennifer", "linda", "barbara", "elizabeth",
+    "susan", "jessica", "sarah", "karen", "lisa", "nancy", "betty",
+    "alina", "vasileios", "fabrizio", "alessandro", "maria", "anna",
+    "peter", "alexander", "kevin", "brian", "wei", "yang", "yong",
+    "ming", "hong", "lin", "jun", "hai", "bo", "lei", "pontiki",
+    "manning", "ganu", "pang", "liu", "wang", "zhang", "chen",
+}
 
-_ALLOWLIST = {
-    "F1 Score", "F-measure", "T5", "GPT-4", "GPT-3", "BERT", "RoBERTa",
-    "XLNet", "T-SNE", "K-Means", "K-NN", "K-Fold",
+# Section-header words — term starting with these is reference/bibliography junk
+_SECTION_PREFIXES = {
+    "references", "bibliography", "appendix", "introduction", "conclusion",
+    "abstract", "acknowledgment", "acknowledgements", "footnote",
+    "figure", "equation", "algorithm", "section", "chapter",
+}
+
+# Generic academic venue terms — never useful as wiki concepts
+_GENERIC_ACADEMIC = {
+    "international conference", "workshop proceedings", "annual meeting",
+    "proceedings of", "journal of", "transactions on", "advances in",
+    "language resources", "exploring attitude", "knowledge management",
+    "information systems", "provincia autonoma", "overview paper",
 }
 
 
@@ -111,8 +106,9 @@ def clean_terms(raw_lines: Sequence[str]) -> list[str]:
       1. Strip whitespace, bullets, numbers, brackets.
       2. Apply rejection filters (author names, junk, digits, etc.).
       3. Validate shape: term must look like a real technical concept.
-      4. Deduplicate (case-insensitive, keep first occurrence).
-      5. Sort by length descending (longer = more specific = more useful).
+      4. Normalize using synonym dictionary (map aliases to canonical name).
+      5. Deduplicate (case-insensitive, keep first occurrence).
+      6. Sort by length descending (longer = more specific = more useful).
 
     Args:
         raw_lines: list of strings from LLM output, one term per line.
@@ -121,34 +117,42 @@ def clean_terms(raw_lines: Sequence[str]) -> list[str]:
         Cleaned list of technical term strings, max 12.
     """
     seen_lower: set[str] = set()
-    cleaned: list[str] = []
+    filtered: list[str] = []
 
+    # Step 1-3: filtering and basic case-insensitive dedup
     for raw in raw_lines:
         term = _normalise(raw)
         if not term:
             continue
 
         # Allowlist bypasses all filters
-        if term in _ALLOWLIST:
-            if term.lower() not in seen_lower:
-                seen_lower.add(term.lower())
-                cleaned.append(term)
-            continue
+        
 
         if _should_reject(term):
             continue
 
-        # Deduplicate
+        # Deduplicate (case-insensitive)
         lower = term.lower()
         if lower in seen_lower:
             continue
         seen_lower.add(lower)
-        cleaned.append(term)
+        filtered.append(term)
 
-    # Sort: longer terms first (more specific), then alphabetically
-    cleaned.sort(key=lambda t: (-len(t.split()), t))
-    return cleaned[:12]
+    # Step 4: Normalize each term to canonical name using synonym dictionary
+    # (e.g., "aspect extraction" -> "Aspect Term Extraction")
+    normalized = [normalize_concept(term) for term in filtered]
 
+    # Step 5: Deduplicate by canonical name (keep first occurrence)
+    result = []
+    seen_norm = set()
+    for norm in normalized:
+        if norm not in seen_norm:
+            seen_norm.add(norm)
+            result.append(norm)
+
+    # Step 6: Sort as before
+    result.sort(key=lambda t: (-len(t.split()), t))
+    return result[:12]
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -178,57 +182,66 @@ def _normalise(raw: str) -> str:
 
 def _should_reject(term: str) -> bool:
     """Return True if the term should be discarded."""
-
-    # Too short or empty
     if len(term) < 2:
         return True
 
-    # Too long (>5 words = almost certainly a phrase fragment or table row)
     words = term.split()
+
+    # Too long
     if len(words) > 5:
         return True
 
-    # Single lowercase word = common English, not a technical concept
+    # Single lowercase word
     if len(words) == 1 and term[0].islower():
         return True
 
-    # Known connector/stopword as entire term
+    # Connector/stopword
     if term.lower() in _CONNECTOR_TERMS:
         return True
 
-    # Looks like "Firstname Lastname" author name
-    if _AUTHOR_NAME.match(term):
+    # Generic academic venue term
+    if term.lower() in _GENERIC_ACADEMIC:
         return True
 
-    # Contains digits unless it's a known allowlist item
-    if _CONTAINS_DIGIT.search(term):
-        # Allow version numbers in known patterns: BERT-Large, GPT-2
-        if not re.match(r"^[A-Z][a-zA-Z]+-\d$", term):
+    # First word is a section-header prefix → bibliography junk
+    # e.g. "References Alina Andreevskaia", "Introduction Opinion Mining"
+    if words[0].lower() in _SECTION_PREFIXES:
+        return True
+
+    # BUG FIX: Old code used _AUTHOR_NAME = ^[A-Z][a-z]+\s+[A-Z][a-z]+$
+    # which caught EVERY 2-word Title Case term including "Sentiment Analysis".
+    # New approach: only reject if first word is a known first name.
+    if len(words) >= 2 and words[0].lower() in _FIRST_NAMES:
+        return True
+
+    # 3-word "SectionPrefix Firstname Lastname"
+    if len(words) == 3:
+        if words[0].lower() in _SECTION_PREFIXES and words[1].lower() in _FIRST_NAMES:
             return True
 
-    # Email or URL fragment
+    # Contains digits — allow BERT-Large style
+    if _CONTAINS_DIGIT.search(term):
+        if not re.match(r"^[A-Z][a-zA-Z]+-\d[A-Za-z]*$", term):
+            return True
+
     if _EMAIL_OR_URL.search(term):
         return True
 
-    # Very long all-caps word (not a real acronym)
     if _LONG_ALLCAPS.match(term):
         return True
 
-    # Fragment (starts lowercase, or ends with comma)
+    # Starts lowercase or ends with comma
     if _FRAGMENT.search(term):
         return True
 
-    # Table row junk: 4+ capitalised words strung together
+    # 4+ capitalized words = table-row junk
     if _TABLE_ROW_JUNK.match(term):
         return True
 
-    # Sentiment label concatenations
-    term_words_set = set(words)
-    sentiment_overlap = term_words_set & _SENTIMENT_WORDS
-    if len(sentiment_overlap) >= 2:
+    # >=2 sentiment polarity words in one term
+    if len(set(words) & _SENTIMENT_WORDS) >= 2:
         return True
 
-    # Citation junk
     if _CITATION.search(term):
         return True
 
@@ -288,3 +301,44 @@ def split_and_clean(raw_line: str, known_concepts: set[str] | None = None) -> li
 
     # Fallback: treat as single term
     return clean_terms([raw_line])
+
+# ============================================================================
+# Improved version with canonicalization to avoid duplicates like
+# "Natural Language Processing" vs "natural-language-processing"
+# ============================================================================
+
+def _canonicalize(term: str) -> str:
+    """
+    Convert a term to a canonical form for deduplication.
+    - Lowercase
+    - Replace spaces, underscores, hyphens with a single space
+    - Remove punctuation (except letters and spaces)
+    - Collapse multiple spaces
+    """
+    term = term.lower()
+    term = re.sub(r'[-_/]', ' ', term)          # replace separators with space
+    term = re.sub(r'[^\w\s]', '', term)        # remove punctuation
+    term = re.sub(r'\s+', ' ', term).strip()   # collapse spaces
+    return term
+
+def clean_terms_deduplicated(raw_lines: Sequence[str]) -> list[str]:
+    """
+    Same as clean_terms() but with aggressive canonicalization deduplication.
+    Use this instead of clean_terms() to avoid duplicate concepts like
+    "Natural Language Processing" and "natural-language-processing".
+    """
+    terms = clean_terms(raw_lines)             # get filtered list
+    canonical_map = {}
+    for term in terms:
+        canon = _canonicalize(term)
+        if canon not in canonical_map:
+            canonical_map[canon] = term
+    # Preserve order of first appearance
+    result = []
+    seen_canon = set()
+    for term in terms:
+        canon = _canonicalize(term)
+        if canon not in seen_canon:
+            seen_canon.add(canon)
+            result.append(term)
+    return result

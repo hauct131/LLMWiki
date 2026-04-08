@@ -17,8 +17,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ..utils.clean_terms import clean_terms
-
+from ..utils.clean_terms import clean_terms_deduplicated as clean_terms
 # ---------------------------------------------------------------------------
 # Base contract type
 # ---------------------------------------------------------------------------

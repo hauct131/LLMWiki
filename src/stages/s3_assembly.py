@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 from ..config import PipelineConfig
 from ..state import IngestState, PageStatus
+from ..vault_linker import normalize_concept
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ source: "{source_url}"
 {related_links}
 
 ---
-*Ingested: {date_ingested} | Quality: {quality_score}/100 | Level: L{fallback_level}*
+*Ingested: {date_ingested} | Quality: __QUALITY__ | Level: __LEVEL__*
 """
 
 CONCEPT_PAGE_TEMPLATE = """\
@@ -96,7 +97,7 @@ INDEX_ROW_TEMPLATE = "| [[{title}]] | {author} | {year} | {importance} | {status
 
 LOG_ENTRY_TEMPLATE = (
     "- `{date_ingested}` — **{title}** "
-    "| L{fallback_level} | score:{quality_score} | {status}"
+    "| {status}"
     "{error_note}"
 )
 
@@ -181,8 +182,6 @@ def _collect_slots(state: IngestState) -> dict[str, str]:
         "weaknesses":     weaknesses,
         "open_questions": open_q,
         "related_links":  links,
-        "quality_score":  str(state.quality_score),
-        "fallback_level": str(state.fallback_level),
     }
 
 
@@ -215,11 +214,14 @@ def _render_task_list(items: list[str]) -> str:
 
 
 def _render_obsidian_links(terms: list[str]) -> str:
-    if not terms:
-        return ""
-    links = [f"- [[{term}]]" for term in terms if term.strip()]
+    seen = set()
+    links = []
+    for term in terms:
+        norm = normalize_concept(term.strip())
+        if norm and len(norm) > 2 and norm not in seen:
+            seen.add(norm)
+            links.append(f"- [[{norm}]]")
     return "\n".join(links)
-
 
 def _render_tags(terms: list[str], title: str) -> str:
     """Convert terms to YAML-safe tag list."""

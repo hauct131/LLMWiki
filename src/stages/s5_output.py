@@ -37,8 +37,11 @@ def run(state: IngestState, config: PipelineConfig) -> IngestState:
         # ── 1. Determine page_status from quality_score ───────────────────
         state.page_status = _compute_status(state.quality_score, config)
 
-        # ── 2. Patch status into the already-assembled page ───────────────
+        # ── 2. Patch status + quality score into the assembled page ───────
         state.structured_page = _patch_status(state.structured_page, state.page_status)
+        state.structured_page = _patch_footer(
+            state.structured_page, state.quality_score, state.fallback_level
+        )
 
         # ── 3. Write source page ──────────────────────────────────────────
         page_path = _output_path(config.output_dir, state.extracted_title)
@@ -167,7 +170,6 @@ def _write_sidecar(sidecar_dir: str, state: IngestState) -> Path:
 
 def _patch_status(page: str, status: str) -> str:
     """Replace the placeholder status value in YAML frontmatter."""
-    # The template writes status: stub by default; update it here.
     return re.sub(
         r"^(status:\s*)(.+)$",
         lambda m: f"{m.group(1)}{status}",
@@ -175,6 +177,14 @@ def _patch_status(page: str, status: str) -> str:
         count=1,
         flags=re.MULTILINE,
     )
+
+
+def _patch_footer(page: str, quality_score: int, fallback_level: int) -> str:
+    """Replace __QUALITY__ and __LEVEL__ placeholders with real values.
+    These are baked in after validation runs so quality_score is accurate."""
+    page = page.replace("__QUALITY__", f"{quality_score}/100")
+    page = page.replace("__LEVEL__", f"L{int(fallback_level)}")
+    return page
 
 
 # ---------------------------------------------------------------------------

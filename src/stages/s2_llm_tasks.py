@@ -13,10 +13,10 @@ Writes to state:
   critical_analysis, open_questions, confirmed_links,
   concept_pages (via P8 for each new term)
 """
-
 from __future__ import annotations
 
 import logging
+import re
 
 from ..config import PipelineConfig
 from ..prompt_runner import PromptRunner
@@ -148,7 +148,9 @@ def run(state: IngestState, config: PipelineConfig, runner: PromptRunner) -> Ing
             },
             fallback_kwargs={"candidate_links": state.candidate_links},
         )
-        state.confirmed_links = terms if isinstance(terms, list) else state.candidate_links
+        state.confirmed_links = _clean_terms(
+            terms if isinstance(terms, list) else state.candidate_links
+        )
 
         # ── P7: Importance (depends on P2 having run) ─────────────────────
         importance, _ = runner.run(
@@ -183,11 +185,46 @@ def _generate_concept_pages(
     state: IngestState,
     runner: PromptRunner,
 ) -> list[dict[str, str]]:
+    import re
+    from pathlib import Path
+
+    def canonical(term: str) -> str:
+        """Chuẩn hóa term để so sánh trùng lặp (bỏ qua hoa/thường, dấu gạch, khoảng trắng)."""
+        t = term.lower()
+        t = re.sub(r'[-_/]', ' ', t)      # thay dấu gạch bằng khoảng trắng
+        t = re.sub(r'[^\w\s]', '', t)    # xóa dấu câu
+        t = re.sub(r'\s+', ' ', t).strip()
+        return t
+
     pages = []
-    for term in terms[:8]:  # cap at 8 to avoid excessive API calls
-        # Find a context snippet where the term appears
+    seen_canonical = set()
+
+    # Lấy thư mục concepts từ config (nếu có) để kiểm tra file đã tồn tại
+    if hasattr(state, 'config') and hasattr(state.config, 'concepts_dir'):
+        concepts_dir = Path(state.config.concepts_dir)
+    else:
+        concepts_dir = None
+
+    for term in terms[:8]:
+        canon = canonical(term)
+        if canon in seen_canonical:
+            continue
+
+        # Kiểm tra nếu file concept đã tồn tại (dựa trên tên slug từ canonical)
+        if concepts_dir and concepts_dir.exists():
+            slug = re.sub(r'\s+', '-', canon)
+            slug = re.sub(r'[^\w-]', '', slug)
+            if (concepts_dir / f"{slug}.md").exists():
+                continue  # đã có, bỏ qua
+
+        seen_canonical.add(canon)
+
+        # Tìm context snippet cho term
         idx = full_text.lower().find(term.lower())
-        snippet = full_text[max(0, idx - 50): idx + 200] if idx != -1 else full_text[:200]
+        if idx != -1:
+            snippet = full_text[max(0, idx - 50): idx + 200]
+        else:
+            snippet = full_text[:200]
 
         result, _ = runner.run(
             P8_CONCEPT, state,
@@ -198,7 +235,6 @@ def _generate_concept_pages(
             pages.append({"name": term, **result})
 
     return pages
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -221,3 +257,12 @@ def _section_or_text(
     if from_end:
         return text[-max_chars:] if len(text) > max_chars else text
     return text[offset: offset + max_chars]
+
+def _clean_terms(terms: list[str]) -> list[str]:
+    """
+    Route through the proper clean_terms pipeline from utils.
+    The old ML-keyword filter was removed — it killed valid NLP/CV concepts
+    like 'Sentiment Analysis', 'SemEval', 'Named Entity Recognition', 'CRF'.
+    """
+    from ..utils.clean_terms import clean_terms_deduplicated
+    return clean_terms_deduplicated(terms)

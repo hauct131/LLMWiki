@@ -1,63 +1,54 @@
+# main.py
+"""
+LLMWiki - Main CLI
+Hỗ trợ cả xử lý đơn lẻ và batch nhiều bài báo
+"""
+
 import sys
-import os
-import fitz  # PyMuPDF
+from pathlib import Path
+import argparse
 
-# SỬA LẠI ĐÂY: Gọi từ gói 'src'
-try:
-    from src import IngestPipeline, PipelineConfig
-except ImportError:
-    # Backup nếu bạn chưa cấu hình __init__.py chuẩn
-    from src.pipeline import IngestPipeline
-    from src.config import PipelineConfig
+# Thêm src vào path
+sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-
-def extract_text(file_path: str) -> str:
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext == ".pdf":
-        doc = fitz.open(file_path)
-        text = "".join([page.get_text() for page in doc])
-        return text
-    else:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return f.read()
+from src.batch_pipeline import BatchIngestPipeline
+from src.config import PipelineConfig
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("❌ Usage: python main.py <path_to_paper>")
-        return
+    parser = argparse.ArgumentParser(
+        description="LLMWiki - Convert research papers to Obsidian Wiki (Phi-3.5 optimized)"
+    )
+    parser.add_argument("input", nargs="+",
+                        help="Path to PDF/text file or folder containing papers")
+    parser.add_argument("--workers", type=int, default=2,
+                        help="Number of parallel workers (default: 2, tăng lên nếu máy mạnh)")
+    parser.add_argument("--model-tier", default="3b", choices=["3b", "7b", "13b+"],
+                        help="Model tier (3b recommended for Phi-3.5 on 4GB VRAM)")
 
-    input_path = sys.argv[1]
-    if not os.path.exists(input_path):
-        print(f"❌ File not found: {input_path}")
-        return
+    args = parser.parse_args()
 
-    # 1. Cấu hình TỐI ƯU CHO PHI-3.5 (4GB VRAM)
+    # Cấu hình tối ưu cho Phi-3.5
     config = PipelineConfig(
-        model_tier="3b",                 # Phi-3.5 thuộc phân khúc Mini (3.8B)
-        api_model_name="phi3.5:latest",  # Đảm bảo bạn đã chạy 'ollama pull phi3.5'
+        model_tier=args.model_tier,
+        api_model_name="phi3.5:latest",   # Đảm bảo bạn đã pull model này
         output_dir="./vault/_sources"
     )
 
-    print(f"📂 Reading file: {os.path.basename(input_path)}...")
-    raw_text = extract_text(input_path)
+    print("=" * 60)
+    print("🚀 LLMWiki Batch Processor (Phi-3.5 optimized)")
+    print("=" * 60)
 
-    if not raw_text.strip():
-        print("❌ Error: Could not extract text from PDF.")
-        return
+    # Khởi tạo Batch Pipeline
+    batch = BatchIngestPipeline(config, max_workers=args.workers)
 
-    # 2. Khởi chạy hệ thống
-    pipeline = IngestPipeline(config)
-    print(f"🚀 Processing with LLM Wiki Logic (Model: Phi-3.5)...")
+    # Chạy batch
+    batch.run_batch(args.input)
 
-    state = pipeline.run(raw_text, input_path)
-
-    print("-" * 40)
-    print(f"✅ SUCCESS: {state.extracted_title}")
-    print(f"⭐ Quality Score: {state.quality_score}/100")
-    print(f"📝 Status: {state.page_status}")
-    print(f"📄 Type: {state.extracted_metadata.get('doc_type', 'Unknown')}")
-    print("-" * 40)
+    print("\n" + "=" * 60)
+    print("✅ All done! Check your Obsidian vault.")
+    print("   Related Papers and concept normalization have been applied.")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
