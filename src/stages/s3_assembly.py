@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from ..config import PipelineConfig
 from ..state import IngestState, PageStatus
-from ..vault_linker import normalize_concept
+from ..utils.concept_normalizer import normalize_concept
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,7 @@ STAGE_NAME = "stage3_assembly"
 SOURCE_PAGE_TEMPLATE = """\
 ---
 title: "{title}"
+aliases: ["{title}"]
 tags: [{tags}]
 author: "{author}"
 year: {year}

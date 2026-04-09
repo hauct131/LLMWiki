@@ -61,20 +61,33 @@ STOPWORDS = {
 
 def _p0_build(text: str) -> str:
     return (
-        "Extract the title of this research paper. "
-        "Output the title only, one line, no quotes.\n\n"
-        f"TEXT:\n{text[:300]}"
+        "Extract the TITLE of this research paper. The title is usually the first "
+        "short heading before the abstract.\n\n"
+        "Rules:\n"
+        "- Output the title only, one line, no quotes.\n"
+        "- Do NOT output the first sentence of the abstract.\n"
+        "- Do NOT start with 'Abstract', 'We propose', 'We present', 'This paper'.\n"
+        "- If the title contains a colon, include it fully (e.g. 'BERT: Bidirectional Encoders').\n"
+        "- If no clear title exists, output: UNKNOWN\n\n"
+        f"TEXT:\n{text[:400]}"
     )
 
 def _p0_validate(out: str) -> bool:
     out = out.strip()
     if not out or "\n" in out:
         return False
+    # Reject if it looks like a sentence (starts with "We", "This ", "Abstract")
+    bad_starts = ("we ", "this ", "abstract", "the paper", "in this", "we propose", "we present")
+    if any(out.lower().startswith(b) for b in bad_starts):
+        return False
     words = out.split()
     return 2 <= len(words) <= 25
 
 def _p0_extract(out: str) -> str:
-    return _strip_md(out.strip().splitlines()[0])
+    title = _strip_md(out.strip().splitlines()[0])
+    # Strip trailing hyphen/dash — artifact of PDF line-break truncation
+    title = re.sub(r'\s*[-–—]+\s*$', '', title).strip()
+    return title
 
 def _p0_fallback(source_path: str = "", cleaned_text: str = "") -> str:
     # Try first H1 in text
@@ -155,21 +168,47 @@ _P1_FORMAT = "AUTHORS: name1, name2\nYEAR: YYYY"
 
 def _p1_build(text: str) -> str:
     return (
-        "Extract the author names and publication year.\n\n"
-        f"Output in this exact format:\n{_P1_FORMAT}\n\n"
-        "If not found, write UNKNOWN for that field.\n\n"
-        f"TEXT:\n{text[:500]}"
+        "Extract the author names and publication year from this text.\n\n"
+        "Rules:\n"
+        "- AUTHORS: list only personal names (e.g. 'Vaswani, Shazeer, Parmar'). "
+        "If no author names found, write UNKNOWN.\n"
+        "- YEAR: a 4-digit publication year. If not found, write UNKNOWN.\n"
+        "- Do NOT copy phrases from the text. Only output proper names.\n\n"
+        "Output ONLY this format (2 lines, nothing else):\n"
+        "AUTHORS: Firstname Lastname, Firstname Lastname\n"
+        "YEAR: YYYY\n\n"
+        f"TEXT:\n{text[:600]}"
     )
 
 def _p1_validate(out: str) -> bool:
-    return "AUTHORS:" in out and "YEAR:" in out
+    if "AUTHORS:" not in out or "YEAR:" not in out:
+        return False
+    # Reject if model echoed the example template back literally
+    if "name1, name2" in out or "name1,name2" in out:
+        return False
+    # Extract author value and check it looks like a name, not a sentence fragment
+    for line in out.splitlines():
+        if line.startswith("AUTHORS:"):
+            val = line.split("AUTHORS:", 1)[1].strip()
+            if val.upper() == "UNKNOWN" or not val:
+                return True  # unknown is acceptable
+            words = val.split()
+            # Reject if it's a common English verb/preposition (sentence fragment)
+            _BAD_STARTS = {"using", "replacing", "taking", "grouping", "based",
+                           "by", "from", "with", "in", "the", "a", "an", "and"}
+            if words and words[0].lower() in _BAD_STARTS:
+                return False
+            # Reject if first word is all lowercase and >4 chars (likely sentence)
+            if words and words[0].islower() and len(words[0]) > 4:
+                return False
+    return True
 
 def _p1_extract(out: str) -> dict[str, str]:
     result = {"author": "Unknown", "year": "Unknown"}
     for line in out.splitlines():
         if line.startswith("AUTHORS:"):
             val = line.split("AUTHORS:", 1)[1].strip()
-            if val and val.upper() != "UNKNOWN":
+            if val and val.upper() != "UNKNOWN" and "name1" not in val.lower():
                 result["author"] = val
         if line.startswith("YEAR:"):
             val = line.split("YEAR:", 1)[1].strip()
@@ -207,11 +246,11 @@ P1_AUTHORS = PromptContract(
 
 def _p2_build(text: str, n_sentences: int = 3) -> str:
     return (
-        f"Summarize this research in exactly {n_sentences} sentences.\n"
-        "Sentence 1: What problem does it solve?\n"
-        "Sentence 2: What is the core method?\n"
-        "Sentence 3: What is the main result?\n\n"
-        "Do not start with 'This paper'. No labels. No bullets.\n\n"
+        f"Write a {n_sentences}-sentence summary of this research paper.\n\n"
+        "CRITICAL: Do NOT write 'Sentence 1:', 'Sentence 2:', or any labels.\n"
+        "Just write the sentences directly, one after another.\n"
+        "Cover: (1) the problem solved, (2) the core method, (3) the main result.\n"
+        "Do not start with 'This paper'. No bullets. No headers.\n\n"
         f"TEXT:\n{text[:1500]}"
     )
 
@@ -219,11 +258,17 @@ def _p2_validate(out: str) -> bool:
     out = out.strip()
     if not out or out.startswith("##") or "- " in out[:5]:
         return False
+    # Reject if model echoed labels back
+    if re.search(r"Sentence\s*\d", out):
+        return False
     sentences = re.split(r"(?<=[.!?])\s+", out)
     sentences = [s for s in sentences if s.strip()]
     return 2 <= len(sentences) <= 6 and 20 <= _word_count(out) <= 250
 
 def _p2_extract(out: str) -> str:
+    # Strip any "Sentence N:" labels the model added despite instructions
+    out = re.sub(r'Sentence\s*\d+\s*:', '', out).strip()
+    out = re.sub(r'\s{2,}', ' ', out)
     return out.strip()
 
 def _p2_fallback(cleaned_text: str = "", extracted_sections: dict = None) -> str:
@@ -393,65 +438,80 @@ P5_QUESTIONS = PromptContract(
 # P6 — Extract Technical Terms (for [[links]])
 # ============================================================================
 
+from ..utils.concept_normalizer import get_vocabulary_for_prompt, normalize_concept, CANONICAL_VOCABULARY
+
+
+# ============================================================================
+# P6 — Extract Technical Terms (CONSTRAINED VOCABULARY approach)
+# ============================================================================
+# Key insight: instead of letting the model freely generate concept names
+# (which produced 120 unique concepts that never link across papers),
+# we give the model the CANONICAL VOCABULARY and ask it to SELECT from it.
+# This guarantees every output maps to a known canonical name → cross-paper
+# linking works by construction.
+# ============================================================================
+
 def _p6_build(text: str, n_terms: int = 7) -> str:
+    vocab = get_vocabulary_for_prompt()
     return (
-        "Extract 5-10 technical concepts from this research text for a wiki.\n\n"
-        "RULES — read carefully:\n"
-        "✓ INCLUDE: method names, model architectures, algorithm names, dataset names, "
-        "evaluation metrics, NLP/ML tasks (e.g. 'Aspect Term Extraction', 'CRF', 'F1 Score').\n"
-        "✗ EXCLUDE author names (e.g. 'Pontiki', 'Manning', 'Ganu').\n"
-        "✗ EXCLUDE statistics or counts (e.g. '163 submissions', '32 teams', '3041 sentences').\n"
-        "✗ EXCLUDE sentiment labels (e.g. 'Positive Negative Conflict Neutral').\n"
-        "✗ EXCLUDE table headers or column names (e.g. 'Train Test Acc', 'Category Total').\n"
-        "✗ EXCLUDE institution names or affiliations.\n\n"
-        "OUTPUT FORMAT: one concept per line, no bullets, no numbers.\n"
-        "Each concept: 1 to 3 words maximum.\n\n"
-        "EXAMPLES of correct output:\n"
-        "Conditional Random Fields\n"
-        "Aspect Term Extraction\n"
-        "Sentiment Analysis\n"
-        "SemEval\n"
-        "Named Entity Recognition\n\n"
-        f"TEXT:\n{text[:3000]}"
+        "From the research text below, select the most relevant technical concepts.\n\n"
+        "IMPORTANT RULES:\n"
+        "1. You MUST only select concepts from the APPROVED LIST below.\n"
+        "2. Output ONLY concept names from the list, one per line, no extra words.\n"
+        "3. Select 3 to 8 concepts that are genuinely relevant to this paper.\n"
+        "4. Do NOT invent new names. Copy exactly from the list.\n\n"
+        f"APPROVED CONCEPT LIST:\n{vocab}\n\n"
+        f"RESEARCH TEXT:\n{text[:2500]}"
     )
 
 def _p6_validate(out: str) -> bool:
     lines = [l.strip() for l in out.splitlines() if l.strip()]
-    if not (3 <= len(lines) <= 20):
+    if not (2 <= len(lines) <= 15):
         return False
-    valid = 0
-    for l in lines:
-        # Reject if starts with bullet or number
-        if l.startswith("- ") or re.match(r"^\d+\.", l):
-            continue
-        # Reject if more than 4 words (concatenated junk)
-        if len(l.split()) > 4:
-            continue
-        # Reject if contains digits (stats, counts)
-        if re.search(r"\d", l):
-            continue
-        valid += 1
-    return valid >= 3
+    # At least 2 lines must match a canonical concept (case-insensitive)
+    canonical_lower = {c.lower() for c in CANONICAL_VOCABULARY.keys()}
+    matches = sum(1 for l in lines if l.lower() in canonical_lower or
+                  any(alias in l.lower() for alias in
+                      [a for aliases in CANONICAL_VOCABULARY.values() for a in aliases[:3]]))
+    return matches >= 2
 
 def _p6_extract(out: str) -> list[str]:
     raw = [l.strip() for l in out.splitlines() if l.strip()]
-    # Strip any bullets/numbers the model added despite instructions
+    # Strip bullets/numbers model may have added
     cleaned_raw = []
     for line in raw:
         line = re.sub(r"^[-*•]\s+", "", line)
         line = re.sub(r"^\d+[.)]\s*", "", line)
         cleaned_raw.append(line.strip())
-    # Run through the full clean_terms pipeline
-    return clean_terms(cleaned_raw)
+    # Normalize each to canonical name
+    result = []
+    seen = set()
+    for term in cleaned_raw:
+        canonical = normalize_concept(term)
+        if canonical and canonical not in seen and len(canonical) > 2:
+            seen.add(canonical)
+            result.append(canonical)
+    return result[:10]
 
-def _p6_fallback(candidate_links: list = None, **_) -> list[str]:
-    return candidate_links or []
+def _p6_fallback(candidate_links: list = None, cleaned_text: str = "", **_) -> list[str]:
+    """Heuristic fallback: match candidate links against canonical vocabulary."""
+    if not candidate_links:
+        return []
+    result = []
+    seen = set()
+    for term in candidate_links:
+        canonical = normalize_concept(term)
+        if canonical and canonical in CANONICAL_VOCABULARY and canonical not in seen:
+            seen.add(canonical)
+            result.append(canonical)
+    return result[:8]
 
 P6_TERMS = PromptContract(
     name="P6_terms",
     system=(
-        "You are a technical term extractor. "
-        "Output only a list of terms. No explanation. No duplicates."
+        "You are a technical concept selector. "
+        "Select ONLY from the approved vocabulary list provided. "
+        "Output concept names exactly as they appear in the list, one per line."
     ),
     build=_p6_build,
     validate=_p6_validate,

@@ -46,6 +46,11 @@ vault/index.md
 vault/log.md
 vault/*.md
 
+# Obsidian vault (nội dung, không phải code)
+vault/
+vault_backup_*/
+*.zip
+
 # PDF files đã download (nếu có)
 _pdfs/
 

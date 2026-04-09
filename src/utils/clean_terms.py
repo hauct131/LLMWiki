@@ -90,6 +90,18 @@ _GENERIC_ACADEMIC = {
     "proceedings of", "journal of", "transactions on", "advances in",
     "language resources", "exploring attitude", "knowledge management",
     "information systems", "provincia autonoma", "overview paper",
+    # Generic method/evaluation terms that are too vague
+    "learning methods", "training procedure", "database assessment",
+    "large datasets", "public datasets", "multiple datasets",
+    "standard datasets", "state of the art", "state of the art performance",
+    "performance maintenance", "source code release", "code availability",
+    "experimental results", "evaluation metrics", "baseline methods",
+    "training time efficiency", "real time performance",
+    "taxonomy of sr techniques", "super resolution tasks",
+    "sentiment analysis tasks", "semantic similarity tasks",
+    "entity recognition tasks", "inference speedup techniques",
+    "deep learning techniques", "gan based methods",
+    "transformer and bert methods",
 }
 
 
@@ -126,7 +138,7 @@ def clean_terms(raw_lines: Sequence[str]) -> list[str]:
             continue
 
         # Allowlist bypasses all filters
-        
+
 
         if _should_reject(term):
             continue
